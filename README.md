@@ -1,3 +1,6 @@
+> **Author**: Ross Durrer  
+> **Created**: 2025
+
 # MITRE ATT&CK Detection Rules Library
 
 [![MITRE ATT&CK](https://img.shields.io/badge/MITRE%20ATT%26CK-v15-red)](https://attack.mitre.org/)
