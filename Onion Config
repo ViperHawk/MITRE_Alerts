@@ -1,0 +1,363 @@
+# Security Onion MITRE ATT&CK Detection Deployment Guide
+
+This guide provides step-by-step instructions for deploying the MITRE ATT&CK detection rules to Security Onion using the provided Sigma rules and import scripts.
+
+## Prerequisites
+
+### Security Onion Requirements
+- Security Onion 2.3.x or later
+- Administrative access to Security Onion manager
+- API access enabled
+- Elasticsearch and Kibana running
+
+### System Requirements
+- Python 3.7 or later
+- Required Python packages (see installation section)
+- Network connectivity to Security Onion manager
+
+## Installation
+
+### 1. Clone the Repository
+```bash
+git clone https://github.com/yourusername/mitre-attack-detection-library.git
+cd mitre-attack-detection-library
+```
+
+### 2. Install Python Dependencies
+```bash
+pip3 install -r requirements.txt
+```
+
+**Requirements.txt:**
+```
+requests>=2.25.0
+PyYAML>=5.4.0
+elasticsearch>=7.10.0
+argparse>=1.4.0
+pathlib>=1.0.0
+```
+
+### 3. Security Onion API Configuration
+
+#### Enable API Access
+```bash
+# On Security Onion manager
+sudo so-elastic-auth
+
+# Create API key
+curl -X POST "localhost:9200/_security/api_key" \
+  -H "Content-Type: application/json" \
+  -u elastic:YOUR_ELASTIC_PASSWORD \
+  -d '{
+    "name": "mitre-detection-api",
+    "role_descriptors": {
+      "mitre_detector": {
+        "cluster": ["manage_watcher", "monitor"],
+        "indices": [
+          {
+            "names": ["logstash-*", "winlogbeat-*", "filebeat-*"],
+            "privileges": ["read", "view_index_metadata"]
+          }
+        ]
+      }
+    }
+  }'
+```
+
+## Deployment Steps
+
+### 1. Prepare Sigma Rules
+
+Place your Security Onion optimized Sigma rules in the `sigma-rules/` directory:
+
+```
+sigma-rules/
+├── execution/
+│   ├── powershell-execution.yml
+│   └── vba-execution.yml
+├── defense-evasion/
+│   ├── dll-injection.yml
+│   └── process-hollowing.yml
+└── initial-access/
+    └── spearphishing.yml
+```
+
+### 2. Deploy Rules to Security Onion
+
+#### Basic Deployment
+```bash
+python3 so_sigma_import.py \
+  --host 192.168.1.100 \
+  --api-key "YOUR_API_KEY_ID:YOUR_API_KEY" \
+  --rules-dir ./sigma-rules/
+```
+
+#### Full Deployment with Dashboards
+```bash
+python3 so_sigma_import.py \
+  --host 192.168.1.100 \
+  --api-key "YOUR_API_KEY_ID:YOUR_API_KEY" \
+  --rules-dir ./sigma-rules/ \
+  --create-dashboards \
+  --generate-report \
+  --verbose
+```
+
+### 3. Verify Deployment
+
+#### Check Elasticsearch Watchers
+```bash
+# List all watchers
+curl -X GET "https://YOUR_SO_HOST:9200/_watcher/watch" \
+  -H "Authorization: ApiKey YOUR_API_KEY" \
+  -k
+
+# Check specific Sigma rule watcher
+curl -X GET "https://YOUR_SO_HOST:9200/_watcher/watch/sigma_rule_RULE_ID" \
+  -H "Authorization: ApiKey YOUR_API_KEY" \
+  -k
+```
+
+#### Validate Using Script
+```bash
+python3 so_sigma_import.py \
+  --host 192.168.1.100 \
+  --api-key "YOUR_API_KEY" \
+  --validate-only
+```
+
+## Security Onion Integration Features
+
+### 1. Elastic Watcher Integration
+- Automatic conversion of Sigma rules to Elasticsearch Watchers
+- Real-time monitoring with 1-minute intervals
+- Integration with Security Onion's alert pipeline
+
+### 2. Field Mapping
+The script automatically maps Sigma fields to Security Onion's field structure:
+
+| Sigma Field | Security Onion Field |
+|-------------|---------------------|
+| EventID | winlog.event_id |
+| Image | winlog.event_data.Image |
+| CommandLine | winlog.event_data.CommandLine |
+| ParentImage | winlog.event_data.ParentImage |
+| Computer | winlog.computer_name |
+
+### 3. Index Pattern Optimization
+Rules are automatically configured to search appropriate indices:
+- **Windows Events**: `winlogbeat-*`
+- **Linux Events**: `filebeat-*`
+- **Network Events**: `suricata-*`, `zeek-*`
+- **General Logs**: `logstash-*`
+
+### 4. MITRE ATT&CK Tagging
+All alerts include MITRE ATT&CK metadata:
+```json
+{
+  "mitre_tags": ["attack.execution", "attack.t1059.001"],
+  "mitre_technique": "T1059.001",
+  "mitre_tactic": "execution",
+  "severity": "critical"
+}
+```
+
+## Kibana Dashboard Configuration
+
+### Accessing MITRE ATT&CK Dashboards
+1. Navigate to Kibana: `https://YOUR_SO_HOST:5601`
+2. Go to **Dashboard** section
+3. Search for "MITRE ATT&CK" dashboards
+
+### Available Visualizations
+- **Tactic Overview**: Alert counts by MITRE tactic
+- **Technique Heatmap**: Coverage visualization
+- **Timeline Analysis**: Attack progression over time
+- **Severity Distribution**: Alert severity breakdown
+
+### Custom Dashboard Creation
+```bash
+# Export existing dashboard
+curl -X GET "https://YOUR_SO_HOST:5601/api/saved_objects/_export" \
+  -H "Content-Type: application/json" \
+  -H "kbn-xsrf: true" \
+  -d '{"type": "dashboard", "includeReferencesDeep": true}'
+```
+
+## Tuning and Optimization
+
+### 1. Reduce False Positives
+
+#### PowerShell Rules Tuning
+```yaml
+# Add to Sigma rule
+filter_legit:
+  Image|startswith:
+    - 'C:\Program Files\PowerShell\'
+    - 'C:\Windows\System32\WindowsPowerShell\'
+  CommandLine|contains:
+    - 'Get-Help'
+    - 'Update-Help'
+condition: selection and not filter_legit
+```
+
+#### Process Injection Rules
+```yaml
+filter_system:
+  SourceImage|startswith:
+    - 'C:\Windows\System32\'
+    - 'C:\Windows\SysWOW64\'
+  TargetImage|startswith:
+    - 'C:\Windows\System32\'
+    - 'C:\Windows\SysWOW64\'
+condition: selection and not filter_system
+```
+
+### 2. Severity Adjustment
+Modify severity levels in the import script:
+```python
+def _map_severity(self, sigma_level: str) -> str:
+    # Custom severity mapping for your environment
+    custom_mapping = {
+        'critical': 'critical',
+        'high': 'high',
+        'medium': 'medium',
+        'low': 'info'  # Downgrade low to info
+    }
+    return custom_mapping.get(sigma_level.lower(), 'medium')
+```
+
+### 3. Performance Optimization
+
+#### Index Optimization
+```bash
+# Optimize indices for better search performance
+curl -X POST "https://YOUR_SO_HOST:9200/winlogbeat-*/_forcemerge?max_num_segments=1" \
+  -H "Authorization: ApiKey YOUR_API_KEY" \
+  -k
+```
+
+#### Watcher Throttling
+```json
+{
+  "throttle_period": "5m",
+  "throttle_period_in_millis": 300000
+}
+```
+
+## Monitoring and Maintenance
+
+### 1. Monitor Rule Performance
+```bash
+# Check watcher execution history
+curl -X GET "https://YOUR_SO_HOST:9200/.watcher-history-*/_search" \
+  -H "Authorization: ApiKey YOUR_API_KEY" \
+  -d '{"query": {"term": {"watch_id": "sigma_rule_RULE_ID"}}}' \
+  -k
+```
+
+### 2. Update Rules
+```bash
+# Update existing rules
+python3 so_sigma_import.py \
+  --host 192.168.1.100 \
+  --api-key "YOUR_API_KEY" \
+  --rules-dir ./updated-sigma-rules/ \
+  --verbose
+```
+
+### 3. Backup Configuration
+```bash
+# Backup all watchers
+curl -X GET "https://YOUR_SO_HOST:9200/_watcher/watch" \
+  -H "Authorization: ApiKey YOUR_API_KEY" \
+  -k > watchers_backup.json
+```
+
+## Troubleshooting
+
+### Common Issues
+
+#### 1. API Authentication Errors
+```bash
+# Verify API key
+curl -X GET "https://YOUR_SO_HOST:9200/_security/_authenticate" \
+  -H "Authorization: ApiKey YOUR_API_KEY" \
+  -k
+```
+
+#### 2. Index Pattern Issues
+```bash
+# Check available indices
+curl -X GET "https://YOUR_SO_HOST:9200/_cat/indices?v" \
+  -H "Authorization: ApiKey YOUR_API_KEY" \
+  -k
+```
+
+#### 3. Watcher Execution Failures
+```bash
+# Check watcher status
+curl -X GET "https://YOUR_SO_HOST:9200/_watcher/stats" \
+  -H "Authorization: ApiKey YOUR_API_KEY" \
+  -k
+```
+
+### Log Analysis
+Check deployment logs:
+```bash
+tail -f so_sigma_import.log
+```
+
+## Security Considerations
+
+### 1. API Key Security
+- Store API keys securely
+- Use environment variables
+- Rotate keys regularly
+
+### 2. Network Security
+- Use HTTPS for all communications
+- Implement proper firewall rules
+- Consider VPN for remote access
+
+### 3. Alert Fatigue Prevention
+- Start with high/critical severity rules
+- Implement proper tuning
+- Regular review and adjustment
+
+## Advanced Configuration
+
+### 1. Custom Field Mappings
+```python
+# Modify field mappings in the script
+custom_mappings = {
+    'CustomField': 'winlog.event_data.CustomField',
+    'ProcessGuid': 'winlog.event_data.ProcessGuid'
+}
+```
+
+### 2. Multi-Tenant Deployment
+```bash
+# Deploy to multiple Security Onion instances
+for host in host1 host2 host3; do
+  python3 so_sigma_import.py --host $host --api-key $API_KEY --rules-dir ./sigma-rules/
+done
+```
+
+### 3. Automated Updates
+```bash
+#!/bin/bash
+# automated_update.sh
+cd /opt/mitre-detection-library
+git pull
+python3 so_sigma_import.py --host $SO_HOST --api-key $API_KEY --rules-dir ./sigma-rules/
+```
+
+## Support and Resources
+
+- **Security Onion Documentation**: https://docs.securityonion.net/
+- **Sigma Project**: https://github.com/SigmaHQ/sigma
+- **MITRE ATT&CK**: https://attack.mitre.org/
+- **Elasticsearch Watcher**: https://www.elastic.co/guide/en/elasticsearch/reference/current/watcher-api.html
+
+For issues and questions, please open an issue in the GitHub repository.
