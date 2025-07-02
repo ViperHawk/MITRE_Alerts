@@ -1,0 +1,379 @@
+# Security Onion MITRE ATT&CK Detection Integration
+
+[![Security Onion](https://img.shields.io/badge/Security%20Onion-2.3+-blue)](https://securityonionsolutions.com/)
+[![MITRE ATT&CK](https://img.shields.io/badge/MITRE%20ATT%26CK-v15-red)](https://attack.mitre.org/)
+[![Sigma Rules](https://img.shields.io/badge/Sigma-Compatible-green)](https://github.com/SigmaHQ/sigma)
+[![Python](https://img.shields.io/badge/Python-3.7+-yellow)](https://python.org/)
+
+Automated deployment and management of MITRE ATT&CK detection rules for Security Onion environments. This integration provides enterprise-grade threat detection with minimal configuration and maximum coverage.
+
+## 🎯 Overview
+
+This Security Onion integration transforms your MITRE ATT&CK Sigma rules into production-ready detection capabilities by:
+
+- **Automated Rule Conversion**: Sigma rules → Elasticsearch Watchers
+- **Native Integration**: Works seamlessly with Security Onion's architecture
+- **MITRE Correlation**: Automatic ATT&CK technique tagging and mapping
+- **Visual Analytics**: Kibana dashboards for threat hunting and coverage analysis
+- **Production Ready**: Monitoring, maintenance, and performance optimization
+
+## 🔧 What's Included
+
+### Core Components
+```
+security-onion-integration/
+├── quick_start.sh                     # One-command deployment
+├── so_sigma_import.py                 # Main import and conversion script
+├── security-onion-optimized-rules.yml # SO-specific Sigma rules
+├── requirements.txt                   # Python dependencies
+└── scripts/
+    ├── setup_so_api.sh               # API configuration
+    ├── configure_so_logging.sh       # Logging optimization
+    ├── deploy_mitre_rules.sh         # Automated deployment
+    ├── monitor_mitre_rules.sh        # Health monitoring
+    └── setup_monitoring_cron.sh      # Maintenance automation
+```
+
+### Detection Coverage
+| MITRE Tactic | Techniques | Optimized Rules | Kibana Dashboards |
+|--------------|------------|-----------------|-------------------|
+| Initial Access | T1566.x | 3 rules | ✅ |
+| Execution | T1059.x | 12 rules | ✅ |
+| Persistence | T1547.x | 4 rules | ✅ |
+| Defense Evasion | T1055.x, T1562.x | 11 rules | ✅ |
+| Credential Access | T1555.x | 2 rules | ✅ |
+| Lateral Movement | T1021.x | 3 rules | ✅ |
+| Impact | T1486, T1490 | 2 rules | ✅ |
+
+**Total**: 37+ production-ready detection rules with full MITRE ATT&CK mapping
+
+## ⚡ Quick Start
+
+### Prerequisites
+- Security Onion 2.3+ with admin access
+- Python 3.7+ on deployment machine
+- Network connectivity to Security Onion manager
+
+### One-Command Deployment
+```bash
+# Clone and deploy everything
+git clone https://github.com/yourusername/mitre-attack-detection-library.git
+cd mitre-attack-detection-library/security-onion-integration/
+
+# Execute quick start (run as root on Security Onion manager)
+sudo ./quick_start.sh
+```
+
+This single command will:
+1. ✅ Install Python dependencies
+2. ✅ Configure Security Onion API access
+3. ✅ Optimize logging (Sysmon, PowerShell, Windows Events)
+4. ✅ Deploy all MITRE detection rules
+5. ✅ Create Kibana dashboards
+6. ✅ Setup monitoring and maintenance
+7. ✅ Generate coverage reports
+
+### Manual Step-by-Step
+If you prefer manual control:
+
+```bash
+# 1. Setup Security Onion API credentials
+sudo ./scripts/setup_so_api.sh
+
+# 2. Configure optimal logging
+sudo ./scripts/configure_so_logging.sh
+
+# 3. Deploy MITRE detection rules
+./scripts/deploy_mitre_rules.sh --host YOUR_SO_HOST
+
+# 4. Setup automated monitoring
+./scripts/setup_monitoring_cron.sh
+```
+
+## 🎛️ Configuration
+
+### Environment Variables
+```bash
+# Security Onion connection
+export SO_HOST="192.168.1.100"
+export MITRE_API_KEY="your-api-key-here"
+
+# Deployment options
+export RULES_DIR="./sigma-rules"
+export ADMIN_EMAIL="admin@company.com"
+```
+
+### Custom Deployment
+```bash
+# Deploy specific rule categories
+python3 so_sigma_import.py \
+  --host 192.168.1.100 \
+  --api-key "your-key" \
+  --rules-dir ./sigma-rules/execution/ \
+  --create-dashboards
+
+# Deploy with custom severity mapping
+python3 so_sigma_import.py \
+  --host 192.168.1.100 \
+  --api-key "your-key" \
+  --rules-dir ./sigma-rules/ \
+  --severity-mapping critical,high \
+  --generate-report
+```
+
+## 📊 Monitoring & Analytics
+
+### Kibana Dashboards
+Access your MITRE ATT&CK dashboards at: `https://your-so-host:5601`
+
+**Available Dashboards:**
+- **MITRE ATT&CK Overview** - Complete technique coverage and alert volume
+- **Tactic Analysis** - Breakdown by MITRE tactics with trend analysis  
+- **Technique Heatmap** - Visual coverage map with alert frequency
+- **Alert Timeline** - Chronological attack progression analysis
+- **False Positive Tracking** - Rule performance and tuning metrics
+
+### Automated Monitoring
+```bash
+# Check rule health (runs daily via cron)
+./scripts/monitor_mitre_rules.sh
+
+# Generate maintenance report
+./scripts/monitor_mitre_rules.sh --report
+
+# Performance metrics
+./scripts/monitor_mitre_rules.sh --performance
+```
+
+### Key Metrics Tracked
+- **Rule Execution Status** - Success/failure rates per technique
+- **Alert Volume** - By severity, tactic, and technique
+- **Performance Impact** - Elasticsearch cluster health
+- **Coverage Gaps** - Missing or inactive detections
+
+## 🔧 Security Onion Optimizations
+
+### Field Mapping
+Our integration automatically maps Sigma fields to Security Onion's structure:
+
+| Sigma Field | Security Onion Field | Purpose |
+|-------------|---------------------|---------|
+| `EventID` | `winlog.event_id` | Windows event correlation |
+| `Image` | `winlog.event_data.Image` | Process identification |
+| `CommandLine` | `winlog.event_data.CommandLine` | Command analysis |
+| `ProcessId` | `winlog.event_data.ProcessId` | Process tracking |
+| `Computer` | `winlog.computer_name` | Host identification |
+
+### Index Pattern Optimization
+Rules automatically target appropriate Security Onion indices:
+
+- **Windows Events**: `winlogbeat-*`
+- **Linux Events**: `filebeat-*`  
+- **Network Traffic**: `suricata-*`, `zeek-*`
+- **General Logs**: `logstash-*`
+
+### Elasticsearch Watcher Integration
+Each Sigma rule becomes an Elasticsearch Watcher with:
+- **Real-time monitoring** (1-minute intervals)
+- **Severity-based alerting** (Critical → High → Medium → Low)
+- **MITRE ATT&CK tagging** for correlation
+- **Alert enrichment** with technique context
+
+## 🎯 Rule Tuning & Customization
+
+### Reduce False Positives
+```yaml
+# Example: Tune PowerShell detection
+filter_legit:
+  Image|startswith:
+    - 'C:\Program Files\PowerShell\'
+    - 'C:\Windows\System32\WindowsPowerShell\'
+  CommandLine|contains:
+    - 'Get-Help'
+    - 'Update-Help'
+    - 'Microsoft.PowerShell.Archive'
+condition: selection and not filter_legit
+```
+
+### Custom Severity Mapping
+```python
+# Modify severity levels in so_sigma_import.py
+def _map_severity(self, sigma_level: str) -> str:
+    custom_mapping = {
+        'critical': 'critical',
+        'high': 'high', 
+        'medium': 'medium',
+        'low': 'info'  # Downgrade low alerts
+    }
+    return custom_mapping.get(sigma_level.lower(), 'medium')
+```
+
+### Environment-Specific Exclusions
+```bash
+# Add to deployment command
+--exclusions "legitimate-admin-tool.exe,approved-software.exe"
+```
+
+## 🚨 Alert Response Integration
+
+### Security Onion Console
+Alerts automatically appear in Security Onion Console with:
+- **MITRE ATT&CK context** - Technique ID, tactic, description
+- **Severity classification** - Based on business impact assessment
+- **Enriched metadata** - Process trees, network connections, file hashes
+- **Playbook integration** - Automated response workflows
+
+### SOAR Integration
+```json
+{
+  "alert_type": "mitre_attack",
+  "technique": "T1059.001",
+  "tactic": "execution", 
+  "severity": "critical",
+  "enrichment": {
+    "process_tree": "...",
+    "network_connections": "...",
+    "file_analysis": "..."
+  }
+}
+```
+
+### Threat Hunting Workflows
+1. **Alert Triage** - Severity-based prioritization
+2. **Technique Analysis** - MITRE context and TTPs
+3. **Lateral Movement Detection** - Cross-host correlation
+4. **Timeline Reconstruction** - Attack progression analysis
+5. **IOC Extraction** - Threat intelligence enrichment
+
+## 🔍 Troubleshooting
+
+### Common Issues
+
+#### API Authentication Problems
+```bash
+# Verify API key
+curl -X GET "https://your-so-host:9200/_security/_authenticate" \
+  -H "Authorization: ApiKey YOUR_API_KEY" -k
+
+# Regenerate API key if needed
+sudo ./scripts/setup_so_api.sh
+```
+
+#### Rule Deployment Failures
+```bash
+# Check Elasticsearch cluster health
+curl -X GET "https://your-so-host:9200/_cluster/health" \
+  -H "Authorization: ApiKey YOUR_API_KEY" -k
+
+# Validate specific rule
+python3 so_sigma_import.py --validate-only --verbose
+```
+
+#### Performance Issues
+```bash
+# Monitor watcher performance
+./scripts/monitor_mitre_rules.sh --performance
+
+# Check thread pool status
+curl -X GET "https://your-so-host:9200/_cat/thread_pool/watcher?v" \
+  -H "Authorization: ApiKey YOUR_API_KEY" -k
+```
+
+### Log Files
+- **Deployment**: `so_sigma_import.log`
+- **Monitoring**: `/var/log/mitre-monitoring.log`  
+- **Maintenance**: `/var/log/mitre-deployment.log`
+
+## 📈 Performance & Scaling
+
+### Resource Requirements
+| Component | CPU | Memory | Storage |
+|-----------|-----|--------|---------|
+| Rule Processing | 2 cores | 4GB RAM | 10GB |
+| Elasticsearch Watchers | 4 cores | 8GB RAM | 50GB |
+| Kibana Dashboards | 2 cores | 4GB RAM | 5GB |
+
+### Scaling Recommendations
+- **Small Environment** (< 1000 endpoints): Default configuration
+- **Medium Environment** (1000-5000 endpoints): Increase watcher threads
+- **Large Environment** (> 5000 endpoints): Distributed deployment
+
+### Performance Tuning
+```bash
+# Optimize Elasticsearch for watchers
+curl -X PUT "https://your-so-host:9200/_cluster/settings" \
+  -H "Content-Type: application/json" \
+  -d '{"persistent": {"xpack.watcher.execution.default_throttle_period": "5m"}}'
+```
+
+## 🤝 Contributing
+
+### Adding New Rules
+1. Create Sigma rule following Security Onion field mappings
+2. Test with `so_sigma_import.py --validate`
+3. Add to appropriate technique directory
+4. Update coverage documentation
+
+### Rule Quality Standards
+- ✅ **MITRE ATT&CK mapping** - Proper technique tagging
+- ✅ **False positive testing** - Validated in lab environment  
+- ✅ **Performance impact** - Optimized queries and filters
+- ✅ **Documentation** - Clear descriptions and contexts
+
+### Submitting Changes
+```bash
+git checkout -b feature/new-technique-t1234
+# Add your optimized Sigma rules
+git commit -m "Add T1234 technique detection"
+git push origin feature/new-technique-t1234
+# Submit pull request
+```
+
+## 📚 Resources & References
+
+### Security Onion
+- [Security Onion Documentation](https://docs.securityonion.net/)
+- [Elasticsearch Watcher Guide](https://www.elastic.co/guide/en/elasticsearch/reference/current/watcher-api.html)
+- [Security Onion GitHub](https://github.com/Security-Onion-Solutions/securityonion)
+
+### MITRE ATT&CK
+- [MITRE ATT&CK Framework](https://attack.mitre.org/)
+- [ATT&CK Navigator](https://mitre-attack.github.io/attack-navigator/)
+- [Detection Engineering Guide](https://car.mitre.org/)
+
+### Sigma Project  
+- [Sigma Rule Repository](https://github.com/SigmaHQ/sigma)
+- [Rule Creation Guide](https://github.com/SigmaHQ/sigma/wiki/Rule-Creation-Guide)
+- [sigmac Conversion Tool](https://github.com/SigmaHQ/sigma#sigmac)
+
+## 📄 License & Support
+
+### License
+This project is licensed under the MIT License - see [LICENSE](LICENSE) file for details.
+
+### Support Channels
+- **🐛 Bug Reports**: [GitHub Issues](../../issues)
+- **💬 Discussions**: [GitHub Discussions](../../discussions)  
+- **📖 Documentation**: [Wiki Pages](../../wiki)
+- **✉️ Email**: security-onion-support@yourcompany.com
+
+### Commercial Support
+Enterprise support available including:
+- Custom rule development
+- Performance optimization consulting  
+- 24/7 monitoring and maintenance
+- Advanced threat hunting services
+
+## 🏆 Acknowledgments
+
+- **Security Onion Solutions** - For the comprehensive SIEM platform
+- **MITRE Corporation** - For the ATT&CK framework
+- **Sigma Project Contributors** - For the detection rule format
+- **Elastic** - For Elasticsearch and Kibana capabilities
+- **Security Community** - For continuous threat intelligence
+
+---
+
+**🛡️ Defend Forward with MITRE ATT&CK + Security Onion! 🛡️**
+
+*Turning threat intelligence into actionable detection capabilities.*
