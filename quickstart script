@@ -1,0 +1,11 @@
+# 1. Setup Security Onion API
+sudo ./setup_so_api.sh
+
+# 2. Configure optimal logging
+sudo ./configure_so_logging.sh
+
+# 3. Deploy MITRE rules
+./deploy_mitre_rules.sh --host YOUR_SO_HOST
+
+# 4. Setup monitoring
+./setup_monitoring_cron.sh
