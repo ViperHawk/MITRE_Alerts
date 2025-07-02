@@ -1,0 +1,602 @@
+#!/usr/bin/env python3
+"""
+Security Onion Sigma Rules Import Script
+Automates the deployment of MITRE ATT&CK Sigma rules to Security Onion
+
+Author: MITRE Detection Library
+Version: 1.0
+Date: 2025-01-01
+"""
+
+import os
+import sys
+import json
+import yaml
+import requests
+import argparse
+import subprocess
+from pathlib import Path
+from typing import Dict, List, Optional
+import logging
+from datetime import datetime
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('so_sigma_import.log'),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger(__name__)
+
+class SecurityOnionSigmaImporter:
+    """
+    Security Onion Sigma Rules Importer
+    Handles conversion and deployment of Sigma rules to Security Onion
+    """
+    
+    def __init__(self, so_host: str, so_api_key: str, rules_directory: str):
+        self.so_host = so_host
+        self.so_api_key = so_api_key
+        self.rules_directory = Path(rules_directory)
+        self.elastic_url = f"https://{so_host}:9200"
+        self.kibana_url = f"https://{so_host}:5601"
+        self.converted_rules = []
+        
+        # Security Onion specific configuration
+        self.so_config = {
+            'index_patterns': [
+                'logstash-*',
+                'winlogbeat-*',
+                'filebeat-*',
+                'suricata-*',
+                'zeek-*'
+            ],
+            'field_mappings': {
+                'EventID': 'winlog.event_id',
+                'Image': 'winlog.event_data.Image',
+                'CommandLine': 'winlog.event_data.CommandLine',
+                'ParentImage': 'winlog.event_data.ParentImage',
+                'ProcessId': 'winlog.event_data.ProcessId',
+                'Computer': 'winlog.computer_name',
+                'User': 'winlog.event_data.User',
+                'SourceImage': 'winlog.event_data.SourceImage',
+                'TargetImage': 'winlog.event_data.TargetImage',
+                'ImageLoaded': 'winlog.event_data.ImageLoaded',
+                'TargetFilename': 'winlog.event_data.TargetFilename'
+            }
+        }
+    
+    def load_sigma_rules(self) -> List[Dict]:
+        """Load all Sigma rules from the specified directory"""
+        logger.info(f"Loading Sigma rules from {self.rules_directory}")
+        rules = []
+        
+        for rule_file in self.rules_directory.glob("**/*.yml"):
+            try:
+                with open(rule_file, 'r', encoding='utf-8') as f:
+                    # Handle multiple YAML documents in one file
+                    documents = list(yaml.safe_load_all(f))
+                    for doc in documents:
+                        if doc and 'title' in doc:
+                            doc['_source_file'] = str(rule_file)
+                            rules.append(doc)
+                            logger.debug(f"Loaded rule: {doc.get('title', 'Unknown')}")
+            except Exception as e:
+                logger.error(f"Error loading {rule_file}: {e}")
+                continue
+        
+        logger.info(f"Successfully loaded {len(rules)} Sigma rules")
+        return rules
+    
+    def convert_sigma_to_elasticsearch(self, sigma_rule: Dict) -> Dict:
+        """Convert Sigma rule to Elasticsearch query format for Security Onion"""
+        try:
+            # Extract rule metadata
+            rule_meta = {
+                'id': sigma_rule.get('id', ''),
+                'title': sigma_rule.get('title', ''),
+                'description': sigma_rule.get('description', ''),
+                'author': sigma_rule.get('author', ''),
+                'tags': sigma_rule.get('tags', []),
+                'level': sigma_rule.get('level', 'medium'),
+                'falsepositives': sigma_rule.get('falsepositives', []),
+                'references': sigma_rule.get('references', [])
+            }
+            
+            # Convert detection logic
+            detection = sigma_rule.get('detection', {})
+            logsource = sigma_rule.get('logsource', {})
+            
+            # Build Elasticsearch query
+            es_query = self._build_elasticsearch_query(detection, logsource)
+            
+            # Create Watcher alert for Security Onion
+            watcher_alert = {
+                'trigger': {
+                    'schedule': {
+                        'interval': '1m'  # Check every minute
+                    }
+                },
+                'input': {
+                    'search': {
+                        'request': {
+                            'search_type': 'query_then_fetch',
+                            'indices': self._get_indices_for_logsource(logsource),
+                            'body': {
+                                'query': es_query,
+                                'size': 100,
+                                'sort': [{'@timestamp': {'order': 'desc'}}]
+                            }
+                        }
+                    }
+                },
+                'condition': {
+                    'compare': {
+                        'ctx.payload.hits.total': {
+                            'gt': 0
+                        }
+                    }
+                },
+                'actions': {
+                    'send_alert': {
+                        'webhook': {
+                            'scheme': 'https',
+                            'host': self.so_host,
+                            'port': 9200,
+                            'method': 'post',
+                            'path': '/_ingest/pipeline/beats',
+                            'headers': {
+                                'Content-Type': 'application/json'
+                            },
+                            'body': json.dumps({
+                                'alert_type': 'sigma_rule',
+                                'rule_id': rule_meta['id'],
+                                'rule_title': rule_meta['title'],
+                                'severity': self._map_severity(rule_meta['level']),
+                                'mitre_tags': [tag for tag in rule_meta['tags'] if tag.startswith('attack.')],
+                                'description': rule_meta['description'],
+                                'timestamp': '{{ctx.execution_time}}',
+                                'matches': '{{ctx.payload.hits.hits}}'
+                            })
+                        }
+                    }
+                },
+                'metadata': rule_meta
+            }
+            
+            return {
+                'rule_id': rule_meta['id'],
+                'rule_title': rule_meta['title'],
+                'watcher_config': watcher_alert,
+                'elasticsearch_query': es_query,
+                'metadata': rule_meta
+            }
+            
+        except Exception as e:
+            logger.error(f"Error converting rule {sigma_rule.get('title', 'Unknown')}: {e}")
+            return None
+    
+    def _build_elasticsearch_query(self, detection: Dict, logsource: Dict) -> Dict:
+        """Build Elasticsearch query from Sigma detection logic"""
+        query_parts = []
+        
+        # Process each selection in the detection
+        for key, value in detection.items():
+            if key == 'condition':
+                continue
+                
+            if isinstance(value, dict):
+                query_part = self._process_selection(value)
+                if query_part:
+                    query_parts.append(query_part)
+        
+        # Process condition logic
+        condition = detection.get('condition', '')
+        if 'and' in condition.lower():
+            return {'bool': {'must': query_parts}}
+        elif 'or' in condition.lower():
+            return {'bool': {'should': query_parts, 'minimum_should_match': 1}}
+        else:
+            return {'bool': {'must': query_parts}}
+    
+    def _process_selection(self, selection: Dict) -> Dict:
+        """Process individual selection criteria"""
+        must_clauses = []
+        
+        for field, criteria in selection.items():
+            # Map Sigma field names to Security Onion field names
+            es_field = self.so_config['field_mappings'].get(field, field)
+            
+            if isinstance(criteria, str):
+                if '|' in field:
+                    # Handle field modifiers (contains, endswith, etc.)
+                    base_field, modifier = field.split('|', 1)
+                    es_field = self.so_config['field_mappings'].get(base_field, base_field)
+                    must_clauses.append(self._build_field_query(es_field, criteria, modifier))
+                else:
+                    must_clauses.append({'term': {es_field: criteria}})
+            elif isinstance(criteria, list):
+                should_clauses = []
+                for item in criteria:
+                    if '|' in field:
+                        base_field, modifier = field.split('|', 1)
+                        es_field = self.so_config['field_mappings'].get(base_field, base_field)
+                        should_clauses.append(self._build_field_query(es_field, item, modifier))
+                    else:
+                        should_clauses.append({'term': {es_field: item}})
+                must_clauses.append({'bool': {'should': should_clauses, 'minimum_should_match': 1}})
+        
+        return {'bool': {'must': must_clauses}}
+    
+    def _build_field_query(self, field: str, value: str, modifier: str) -> Dict:
+        """Build field query based on modifier"""
+        if modifier == 'contains':
+            return {'wildcard': {field: f'*{value}*'}}
+        elif modifier == 'endswith':
+            return {'wildcard': {field: f'*{value}'}}
+        elif modifier == 'startswith':
+            return {'wildcard': {field: f'{value}*'}}
+        elif modifier == 're':
+            return {'regexp': {field: value}}
+        else:
+            return {'term': {field: value}}
+    
+    def _get_indices_for_logsource(self, logsource: Dict) -> List[str]:
+        """Determine which indices to search based on log source"""
+        category = logsource.get('category', '')
+        product = logsource.get('product', '')
+        service = logsource.get('service', '')
+        
+        if product == 'windows':
+            if service == 'sysmon':
+                return ['winlogbeat-*']
+            elif service == 'powershell':
+                return ['winlogbeat-*']
+            else:
+                return ['winlogbeat-*', 'logstash-*']
+        elif product == 'linux':
+            return ['filebeat-*', 'logstash-*']
+        elif category == 'network':
+            return ['suricata-*', 'zeek-*']
+        else:
+            return self.so_config['index_patterns']
+    
+    def _map_severity(self, sigma_level: str) -> str:
+        """Map Sigma severity levels to Security Onion severity"""
+        mapping = {
+            'critical': 'critical',
+            'high': 'high',
+            'medium': 'medium',
+            'low': 'low',
+            'informational': 'info'
+        }
+        return mapping.get(sigma_level.lower(), 'medium')
+    
+    def deploy_to_security_onion(self, converted_rules: List[Dict]) -> bool:
+        """Deploy converted rules to Security Onion"""
+        logger.info(f"Deploying {len(converted_rules)} rules to Security Onion")
+        
+        success_count = 0
+        failed_count = 0
+        
+        for rule in converted_rules:
+            try:
+                # Deploy as Elasticsearch Watcher
+                watcher_id = f"sigma_rule_{rule['rule_id']}"
+                
+                # API call to create Watcher
+                response = self._create_elasticsearch_watcher(watcher_id, rule['watcher_config'])
+                
+                if response:
+                    logger.info(f"Successfully deployed rule: {rule['rule_title']}")
+                    success_count += 1
+                else:
+                    logger.error(f"Failed to deploy rule: {rule['rule_title']}")
+                    failed_count += 1
+                    
+            except Exception as e:
+                logger.error(f"Error deploying rule {rule['rule_title']}: {e}")
+                failed_count += 1
+        
+        logger.info(f"Deployment complete: {success_count} success, {failed_count} failed")
+        return failed_count == 0
+    
+    def _create_elasticsearch_watcher(self, watcher_id: str, watcher_config: Dict) -> bool:
+        """Create Elasticsearch Watcher via API"""
+        try:
+            url = f"{self.elastic_url}/_watcher/watch/{watcher_id}"
+            headers = {
+                'Content-Type': 'application/json',
+                'Authorization': f'ApiKey {self.so_api_key}'
+            }
+            
+            response = requests.put(url, json=watcher_config, headers=headers, verify=False)
+            
+            if response.status_code in [200, 201]:
+                return True
+            else:
+                logger.error(f"Watcher creation failed: {response.status_code} - {response.text}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error creating watcher: {e}")
+            return False
+    
+    def create_kibana_dashboards(self, rules: List[Dict]) -> bool:
+        """Create Kibana dashboards for rule visualization"""
+        logger.info("Creating Kibana dashboards for MITRE ATT&CK coverage")
+        
+        try:
+            # Group rules by MITRE tactic
+            tactics = {}
+            for rule in rules:
+                mitre_tags = [tag for tag in rule['metadata']['tags'] if tag.startswith('attack.') and not tag.startswith('attack.t')]
+                for tag in mitre_tags:
+                    tactic = tag.replace('attack.', '')
+                    if tactic not in tactics:
+                        tactics[tactic] = []
+                    tactics[tactic].append(rule)
+            
+            # Create dashboard configuration
+            dashboard_config = {
+                'version': '8.0.0',
+                'objects': []
+            }
+            
+            # Add visualizations for each tactic
+            for tactic, tactic_rules in tactics.items():
+                viz_config = self._create_tactic_visualization(tactic, tactic_rules)
+                dashboard_config['objects'].append(viz_config)
+            
+            # Export dashboard to file
+            dashboard_file = f"mitre_attack_dashboard_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            with open(dashboard_file, 'w') as f:
+                json.dump(dashboard_config, f, indent=2)
+            
+            logger.info(f"Dashboard configuration saved to {dashboard_file}")
+            
+            # Import dashboard to Kibana
+            return self._import_kibana_dashboard(dashboard_config)
+            
+        except Exception as e:
+            logger.error(f"Error creating Kibana dashboards: {e}")
+            return False
+    
+    def _create_tactic_visualization(self, tactic: str, rules: List[Dict]) -> Dict:
+        """Create visualization configuration for a MITRE tactic"""
+        return {
+            'id': f'mitre-{tactic}-visualization',
+            'type': 'visualization',
+            'attributes': {
+                'title': f'MITRE ATT&CK - {tactic.title()} Tactic',
+                'visState': json.dumps({
+                    'title': f'MITRE ATT&CK - {tactic.title()}',
+                    'type': 'histogram',
+                    'params': {
+                        'grid': {'categoryLines': False, 'style': {'color': '#eee'}},
+                        'categoryAxes': [{'id': 'CategoryAxis-1', 'type': 'category', 'position': 'bottom', 'show': True}],
+                        'valueAxes': [{'id': 'ValueAxis-1', 'name': 'LeftAxis-1', 'type': 'value', 'position': 'left', 'show': True}]
+                    },
+                    'aggs': [
+                        {'id': '1', 'enabled': True, 'type': 'count', 'schema': 'metric', 'params': {}},
+                        {'id': '2', 'enabled': True, 'type': 'terms', 'schema': 'segment', 'params': {'field': 'rule_title.keyword', 'size': 10}}
+                    ]
+                }),
+                'uiStateJSON': '{}',
+                'description': f'Alert counts for {tactic} tactic techniques',
+                'version': 1,
+                'kibanaSavedObjectMeta': {
+                    'searchSourceJSON': json.dumps({
+                        'index': 'logstash-*',
+                        'query': {
+                            'match': {
+                                'mitre_tags': f'attack.{tactic}'
+                            }
+                        },
+                        'filter': []
+                    })
+                }
+            }
+        }
+    
+    def _import_kibana_dashboard(self, dashboard_config: Dict) -> bool:
+        """Import dashboard configuration to Kibana"""
+        try:
+            url = f"{self.kibana_url}/api/saved_objects/_import"
+            headers = {
+                'Content-Type': 'application/json',
+                'kbn-xsrf': 'true',
+                'Authorization': f'ApiKey {self.so_api_key}'
+            }
+            
+            response = requests.post(url, json=dashboard_config, headers=headers, verify=False)
+            
+            if response.status_code == 200:
+                logger.info("Successfully imported Kibana dashboard")
+                return True
+            else:
+                logger.error(f"Dashboard import failed: {response.status_code} - {response.text}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error importing dashboard: {e}")
+            return False
+    
+    def generate_coverage_report(self, rules: List[Dict]) -> str:
+        """Generate MITRE ATT&CK coverage report"""
+        logger.info("Generating MITRE ATT&CK coverage report")
+        
+        tactics = {}
+        techniques = {}
+        
+        for rule in rules:
+            tags = rule['metadata']['tags']
+            
+            # Extract tactics
+            tactic_tags = [tag for tag in tags if tag.startswith('attack.') and not tag.startswith('attack.t')]
+            for tag in tactic_tags:
+                tactic = tag.replace('attack.', '')
+                if tactic not in tactics:
+                    tactics[tactic] = []
+                tactics[tactic].append(rule['rule_title'])
+            
+            # Extract techniques
+            technique_tags = [tag for tag in tags if tag.startswith('attack.t')]
+            for tag in technique_tags:
+                technique = tag.replace('attack.', '')
+                if technique not in techniques:
+                    techniques[technique] = []
+                techniques[technique].append(rule['rule_title'])
+        
+        # Generate report
+        report = f"""
+# MITRE ATT&CK Coverage Report
+Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+Total Rules Deployed: {len(rules)}
+
+## Tactics Coverage ({len(tactics)} tactics)
+"""
+        
+        for tactic, tactic_rules in sorted(tactics.items()):
+            report += f"\n### {tactic.title().replace('_', ' ')} ({len(tactic_rules)} rules)\n"
+            for rule_title in sorted(tactic_rules):
+                report += f"- {rule_title}\n"
+        
+        report += f"\n## Techniques Coverage ({len(techniques)} techniques)\n"
+        
+        for technique, technique_rules in sorted(techniques.items()):
+            report += f"\n### {technique.upper()} ({len(technique_rules)} rules)\n"
+            for rule_title in sorted(technique_rules):
+                report += f"- {rule_title}\n"
+        
+        # Save report to file
+        report_file = f"mitre_coverage_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
+        with open(report_file, 'w') as f:
+            f.write(report)
+        
+        logger.info(f"Coverage report saved to {report_file}")
+        return report_file
+    
+    def validate_deployment(self) -> bool:
+        """Validate that rules were deployed successfully"""
+        logger.info("Validating rule deployment")
+        
+        try:
+            # Check Elasticsearch Watchers
+            url = f"{self.elastic_url}/_watcher/watch"
+            headers = {'Authorization': f'ApiKey {self.so_api_key}'}
+            
+            response = requests.get(url, headers=headers, verify=False)
+            
+            if response.status_code == 200:
+                watchers = response.json()
+                sigma_watchers = [w for w in watchers if w.get('id', '').startswith('sigma_rule_')]
+                logger.info(f"Found {len(sigma_watchers)} deployed Sigma rules")
+                return True
+            else:
+                logger.error(f"Validation failed: {response.status_code}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error validating deployment: {e}")
+            return False
+
+def main():
+    """Main execution function"""
+    parser = argparse.ArgumentParser(
+        description='Deploy MITRE ATT&CK Sigma rules to Security Onion',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Deploy all rules from directory
+  python3 so_sigma_import.py --host 192.168.1.100 --api-key YOUR_API_KEY --rules-dir ./sigma-rules/
+  
+  # Deploy with dashboard creation
+  python3 so_sigma_import.py --host 192.168.1.100 --api-key YOUR_API_KEY --rules-dir ./sigma-rules/ --create-dashboards
+  
+  # Validate existing deployment
+  python3 so_sigma_import.py --host 192.168.1.100 --api-key YOUR_API_KEY --validate-only
+        """
+    )
+    
+    parser.add_argument('--host', required=True, help='Security Onion host IP or FQDN')
+    parser.add_argument('--api-key', required=True, help='Security Onion API key')
+    parser.add_argument('--rules-dir', default='./sigma-rules', help='Directory containing Sigma rules (default: ./sigma-rules)')
+    parser.add_argument('--create-dashboards', action='store_true', help='Create Kibana dashboards')
+    parser.add_argument('--generate-report', action='store_true', help='Generate coverage report')
+    parser.add_argument('--validate-only', action='store_true', help='Only validate existing deployment')
+    parser.add_argument('--verbose', '-v', action='store_true', help='Enable verbose logging')
+    
+    args = parser.parse_args()
+    
+    if args.verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
+    
+    # Initialize importer
+    importer = SecurityOnionSigmaImporter(args.host, args.api_key, args.rules_dir)
+    
+    try:
+        if args.validate_only:
+            # Only validate existing deployment
+            if importer.validate_deployment():
+                logger.info("Deployment validation successful")
+                return 0
+            else:
+                logger.error("Deployment validation failed")
+                return 1
+        
+        # Load Sigma rules
+        sigma_rules = importer.load_sigma_rules()
+        if not sigma_rules:
+            logger.error("No Sigma rules found to deploy")
+            return 1
+        
+        # Convert rules to Elasticsearch format
+        logger.info("Converting Sigma rules to Elasticsearch format")
+        converted_rules = []
+        for rule in sigma_rules:
+            converted = importer.convert_sigma_to_elasticsearch(rule)
+            if converted:
+                converted_rules.append(converted)
+        
+        if not converted_rules:
+            logger.error("No rules successfully converted")
+            return 1
+        
+        logger.info(f"Successfully converted {len(converted_rules)} rules")
+        
+        # Deploy rules to Security Onion
+        if not importer.deploy_to_security_onion(converted_rules):
+            logger.error("Rule deployment failed")
+            return 1
+        
+        # Create Kibana dashboards if requested
+        if args.create_dashboards:
+            if not importer.create_kibana_dashboards(converted_rules):
+                logger.warning("Dashboard creation failed, but continuing...")
+        
+        # Generate coverage report if requested
+        if args.generate_report:
+            report_file = importer.generate_coverage_report(converted_rules)
+            logger.info(f"Coverage report generated: {report_file}")
+        
+        # Validate deployment
+        if importer.validate_deployment():
+            logger.info("✅ Deployment completed successfully!")
+            return 0
+        else:
+            logger.error("❌ Deployment validation failed")
+            return 1
+            
+    except KeyboardInterrupt:
+        logger.info("Deployment interrupted by user")
+        return 1
+    except Exception as e:
+        logger.error(f"Unexpected error: {e}")
+        return 1
+
+if __name__ == '__main__':
+    sys.exit(main())
