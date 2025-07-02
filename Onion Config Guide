@@ -1,0 +1,736 @@
+#!/bin/bash
+# Security Onion Configuration and Setup Scripts
+# for MITRE ATT&CK Detection Rules Deployment
+
+# ===================================
+# requirements.txt
+# ===================================
+cat > requirements.txt << 'EOF'
+requests>=2.25.0
+PyYAML>=5.4.0
+elasticsearch>=7.10.0
+urllib3>=1.26.0
+certifi>=2021.5.30
+charset-normalizer>=2.0.0
+idna>=3.2
+EOF
+
+# ===================================
+# Security Onion API Setup Script
+# ===================================
+cat > setup_so_api.sh << 'EOF'
+#!/bin/bash
+# Security Onion API Setup for MITRE Detection Rules
+
+set -e
+
+echo "Setting up Security Onion API for MITRE Detection Rules..."
+
+# Check if running as root
+if [[ $EUID -ne 0 ]]; then
+   echo "This script must be run as root (use sudo)"
+   exit 1
+fi
+
+# Get Security Onion status
+echo "Checking Security Onion status..."
+so-status
+
+# Create API key for MITRE detection rules
+echo "Creating API key for MITRE detection rules..."
+
+# Get elastic password
+ELASTIC_PASSWORD=$(sudo cat /opt/so/saltstack/local/pillar/secrets.sls | grep "elasticsearch_password" | awk '{print $2}')
+
+if [ -z "$ELASTIC_PASSWORD" ]; then
+    echo "Error: Could not retrieve Elasticsearch password"
+    exit 1
+fi
+
+# Create API key
+API_RESPONSE=$(curl -s -X POST "localhost:9200/_security/api_key" \
+  -H "Content-Type: application/json" \
+  -u "elastic:$ELASTIC_PASSWORD" \
+  -d '{
+    "name": "mitre-detection-api",
+    "role_descriptors": {
+      "mitre_detector": {
+        "cluster": ["manage_watcher", "monitor", "manage_pipeline"],
+        "indices": [
+          {
+            "names": ["logstash-*", "winlogbeat-*", "filebeat-*", "suricata-*", "zeek-*"],
+            "privileges": ["read", "view_index_metadata", "monitor"]
+          },
+          {
+            "names": [".watcher-history-*"],
+            "privileges": ["read", "write", "create_index", "monitor"]
+          }
+        ]
+      }
+    },
+    "expiration": "1y"
+  }')
+
+if [ $? -eq 0 ]; then
+    echo "API Key created successfully!"
+    echo "API Response: $API_RESPONSE"
+    
+    # Extract API key
+    API_KEY_ID=$(echo $API_RESPONSE | jq -r '.id')
+    API_KEY_SECRET=$(echo $API_RESPONSE | jq -r '.api_key')
+    
+    echo ""
+    echo "================================================"
+    echo "IMPORTANT: Save these credentials securely!"
+    echo "================================================"
+    echo "API Key ID: $API_KEY_ID"
+    echo "API Key Secret: $API_KEY_SECRET"
+    echo "Full API Key: $API_KEY_ID:$API_KEY_SECRET"
+    echo "================================================"
+    echo ""
+    echo "Use this API key with the deployment script:"
+    echo "python3 so_sigma_import.py --api-key \"$API_KEY_ID:$API_KEY_SECRET\" ..."
+    
+    # Save to file (secure)
+    echo "$API_KEY_ID:$API_KEY_SECRET" > /opt/so/conf/mitre-api-key.txt
+    chmod 600 /opt/so/conf/mitre-api-key.txt
+    echo "API key also saved to: /opt/so/conf/mitre-api-key.txt"
+    
+else
+    echo "Error: Failed to create API key"
+    exit 1
+fi
+
+echo "Security Onion API setup complete!"
+EOF
+
+chmod +x setup_so_api.sh
+
+# ===================================
+# Security Onion Log Source Configuration
+# ===================================
+cat > configure_so_logging.sh << 'EOF'
+#!/bin/bash
+# Configure Security Onion for optimal MITRE ATT&CK detection
+
+set -e
+
+echo "Configuring Security Onion for MITRE ATT&CK detection..."
+
+# Ensure Sysmon is configured properly
+echo "Configuring Sysmon..."
+cat > /opt/so/saltstack/local/pillar/sysmon.sls << 'SYSMON_EOF'
+sysmon:
+  config: |
+    <Sysmon schemaversion="4.40">
+      <EventFiltering>
+        <!-- Process Creation -->
+        <ProcessCreate onmatch="include">
+          <Image condition="contains">powershell</Image>
+          <Image condition="contains">cmd</Image>
+          <Image condition="contains">wscript</Image>
+          <Image condition="contains">cscript</Image>
+          <Image condition="contains">rundll32</Image>
+          <Image condition="contains">regsvr32</Image>
+          <CommandLine condition="contains">-encoded</CommandLine>
+          <CommandLine condition="contains">-enc</CommandLine>
+          <CommandLine condition="contains">bypass</CommandLine>
+          <CommandLine condition="contains">hidden</CommandLine>
+          <CommandLine condition="contains">IEX</CommandLine>
+          <CommandLine condition="contains">Invoke-Expression</CommandLine>
+          <CommandLine condition="contains">DownloadString</CommandLine>
+        </ProcessCreate>
+        
+        <!-- Network Connections -->
+        <NetworkConnect onmatch="include">
+          <Image condition="contains">powershell</Image>
+          <Image condition="contains">cmd</Image>
+          <Image condition="contains">rundll32</Image>
+          <DestinationPort condition="is">443</DestinationPort>
+          <DestinationPort condition="is">80</DestinationPort>
+          <DestinationPort condition="is">445</DestinationPort>
+        </NetworkConnect>
+        
+        <!-- Process Access -->
+        <ProcessAccess onmatch="include">
+          <TargetImage condition="contains">lsass.exe</TargetImage>
+          <GrantedAccess condition="is">0x1010</GrantedAccess>
+          <GrantedAccess condition="is">0x1038</GrantedAccess>
+          <GrantedAccess condition="is">0x40</GrantedAccess>
+          <GrantedAccess condition="is">0x1400</GrantedAccess>
+          <GrantedAccess condition="is">0x1f0fff</GrantedAccess>
+          <GrantedAccess condition="is">0x1f1fff</GrantedAccess>
+          <GrantedAccess condition="is">0x143a</GrantedAccess>
+          <GrantedAccess condition="is">0x1410</GrantedAccess>
+          <GrantedAccess condition="is">0x1f2fff</GrantedAccess>
+          <GrantedAccess condition="is">0x1f3fff</GrantedAccess>
+        </ProcessAccess>
+        
+        <!-- Image/DLL Loading -->
+        <ImageLoad onmatch="include">
+          <ImageLoaded condition="contains">temp</ImageLoaded>
+          <ImageLoaded condition="contains">appdata</ImageLoaded>
+          <ImageLoaded condition="contains">programdata</ImageLoaded>
+        </ImageLoad>
+        
+        <!-- File Creation -->
+        <FileCreate onmatch="include">
+          <TargetFilename condition="endswith">.exe</TargetFilename>
+          <TargetFilename condition="endswith">.dll</TargetFilename>
+          <TargetFilename condition="endswith">.scr</TargetFilename>
+          <TargetFilename condition="endswith">.bat</TargetFilename>
+          <TargetFilename condition="endswith">.cmd</TargetFilename>
+          <TargetFilename condition="endswith">.ps1</TargetFilename>
+          <TargetFilename condition="endswith">.vbs</TargetFilename>
+          <TargetFilename condition="endswith">.js</TargetFilename>
+        </FileCreate>
+        
+        <!-- Registry Events -->
+        <RegistryEvent onmatch="include">
+          <TargetObject condition="contains">Run</TargetObject>
+          <TargetObject condition="contains">RunOnce</TargetObject>
+          <TargetObject condition="contains">Winlogon</TargetObject>
+          <TargetObject condition="contains">Services</TargetObject>
+          <TargetObject condition="contains">CurrentVersion</TargetObject>
+        </RegistryEvent>
+        
+        <!-- CreateRemoteThread -->
+        <CreateRemoteThread onmatch="include">
+          <StartFunction condition="contains">LoadLibrary</StartFunction>
+          <StartFunction condition="contains">LdrLoad</StartFunction>
+        </CreateRemoteThread>
+        
+        <!-- RawAccessRead -->
+        <RawAccessRead onmatch="include">
+          <Device condition="contains">Harddisk</Device>
+        </RawAccessRead>
+      </EventFiltering>
+    </Sysmon>
+SYSMON_EOF
+
+# Configure PowerShell logging
+echo "Configuring PowerShell logging..."
+cat > /opt/so/saltstack/local/pillar/powershell.sls << 'PS_EOF'
+powershell_logging:
+  module_logging: True
+  script_block_logging: True
+  transcription_logging: True
+  enhanced_logging: True
+PS_EOF
+
+# Configure Windows Event Log collection
+echo "Configuring Windows Event Log collection..."
+cat > /opt/so/saltstack/local/pillar/winlogbeat.sls << 'WLB_EOF'
+winlogbeat:
+  config:
+    event_logs:
+      - name: Application
+        level: warning
+      - name: System
+        level: warning
+      - name: Security
+        event_id: 4624,4625,4648,4672,4688,4697,4698,4702,4719,4720,4722,4724,4728,4732,4735,4738,4740,4756,4767,4776,4778,4779,4781,4798,5140,5142,5145
+      - name: Microsoft-Windows-Sysmon/Operational
+        level: information
+      - name: Windows PowerShell
+        event_id: 400,403,600,800
+      - name: Microsoft-Windows-PowerShell/Operational
+        event_id: 4103,4104,4105,4106
+      - name: Microsoft-Windows-Windows Defender/Operational
+        level: warning
+      - name: Microsoft-Windows-AppLocker/EXE and DLL
+        level: warning
+      - name: Microsoft-Windows-AppLocker/MSI and Script
+        level: warning
+WLB_EOF
+
+echo "Applying Security Onion configuration..."
+sudo salt-call state.apply
+
+echo "Security Onion logging configuration complete!"
+EOF
+
+chmod +x configure_so_logging.sh
+
+# ===================================
+# Deployment Automation Script
+# ===================================
+cat > deploy_mitre_rules.sh << 'EOF'
+#!/bin/bash
+# Automated MITRE ATT&CK Rules Deployment to Security Onion
+
+set -e
+
+# Configuration
+SO_HOST=${SO_HOST:-"localhost"}
+RULES_DIR=${RULES_DIR:-"./sigma-rules"}
+LOG_FILE="/var/log/mitre-deployment.log"
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Logging function
+log() {
+    echo -e "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "$LOG_FILE"
+}
+
+log_info() {
+    log "${BLUE}[INFO]${NC} $1"
+}
+
+log_warn() {
+    log "${YELLOW}[WARN]${NC} $1"
+}
+
+log_error() {
+    log "${RED}[ERROR]${NC} $1"
+}
+
+log_success() {
+    log "${GREEN}[SUCCESS]${NC} $1"
+}
+
+# Check prerequisites
+check_prerequisites() {
+    log_info "Checking prerequisites..."
+    
+    # Check if Python 3 is available
+    if ! command -v python3 &> /dev/null; then
+        log_error "Python 3 is not installed"
+        exit 1
+    fi
+    
+    # Check if required Python packages are installed
+    python3 -c "import requests, yaml, json" 2>/dev/null || {
+        log_error "Required Python packages not installed. Run: pip3 install -r requirements.txt"
+        exit 1
+    }
+    
+    # Check if API key is available
+    if [ -f "/opt/so/conf/mitre-api-key.txt" ]; then
+        API_KEY=$(cat /opt/so/conf/mitre-api-key.txt)
+        log_info "Found API key from configuration file"
+    elif [ -n "$MITRE_API_KEY" ]; then
+        API_KEY="$MITRE_API_KEY"
+        log_info "Using API key from environment variable"
+    else
+        log_error "No API key found. Set MITRE_API_KEY environment variable or run setup_so_api.sh"
+        exit 1
+    fi
+    
+    # Check if rules directory exists
+    if [ ! -d "$RULES_DIR" ]; then
+        log_error "Rules directory not found: $RULES_DIR"
+        exit 1
+    fi
+    
+    log_success "Prerequisites check passed"
+}
+
+# Deploy rules
+deploy_rules() {
+    log_info "Starting MITRE ATT&CK rules deployment to Security Onion..."
+    
+    # Count rules
+    RULE_COUNT=$(find "$RULES_DIR" -name "*.yml" | wc -l)
+    log_info "Found $RULE_COUNT Sigma rules to deploy"
+    
+    # Run deployment script
+    python3 so_sigma_import.py \
+        --host "$SO_HOST" \
+        --api-key "$API_KEY" \
+        --rules-dir "$RULES_DIR" \
+        --create-dashboards \
+        --generate-report \
+        --verbose 2>&1 | tee -a "$LOG_FILE"
+    
+    if [ ${PIPESTATUS[0]} -eq 0 ]; then
+        log_success "Rules deployment completed successfully"
+        return 0
+    else
+        log_error "Rules deployment failed"
+        return 1
+    fi
+}
+
+# Validate deployment
+validate_deployment() {
+    log_info "Validating deployment..."
+    
+    python3 so_sigma_import.py \
+        --host "$SO_HOST" \
+        --api-key "$API_KEY" \
+        --validate-only 2>&1 | tee -a "$LOG_FILE"
+    
+    if [ ${PIPESTATUS[0]} -eq 0 ]; then
+        log_success "Deployment validation passed"
+        return 0
+    else
+        log_error "Deployment validation failed"
+        return 1
+    fi
+}
+
+# Generate summary report
+generate_summary() {
+    log_info "Generating deployment summary..."
+    
+    cat << SUMMARY_EOF | tee -a "$LOG_FILE"
+
+========================================
+MITRE ATT&CK Deployment Summary
+========================================
+Date: $(date)
+Security Onion Host: $SO_HOST
+Rules Directory: $RULES_DIR
+Total Rules Processed: $RULE_COUNT
+
+Deployment Status: $([ $? -eq 0 ] && echo "SUCCESS" || echo "FAILED")
+
+Log File: $LOG_FILE
+
+Next Steps:
+1. Check Kibana dashboards: https://$SO_HOST:5601
+2. Review alerts in Security Onion Console
+3. Monitor rule performance and tune as needed
+4. Check coverage report for gaps
+
+========================================
+SUMMARY_EOF
+}
+
+# Main execution
+main() {
+    log_info "Starting MITRE ATT&CK deployment process..."
+    
+    check_prerequisites
+    
+    if deploy_rules; then
+        validate_deployment
+        generate_summary
+        log_success "MITRE ATT&CK deployment completed successfully!"
+        exit 0
+    else
+        log_error "MITRE ATT&CK deployment failed!"
+        exit 1
+    fi
+}
+
+# Command line argument parsing
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --host)
+            SO_HOST="$2"
+            shift 2
+            ;;
+        --rules-dir)
+            RULES_DIR="$2"
+            shift 2
+            ;;
+        --api-key)
+            MITRE_API_KEY="$2"
+            shift 2
+            ;;
+        --help)
+            echo "Usage: $0 [options]"
+            echo "Options:"
+            echo "  --host HOST          Security Onion host (default: localhost)"
+            echo "  --rules-dir DIR      Sigma rules directory (default: ./sigma-rules)"
+            echo "  --api-key KEY        API key for Security Onion"
+            echo "  --help               Show this help message"
+            exit 0
+            ;;
+        *)
+            log_error "Unknown option: $1"
+            exit 1
+            ;;
+    esac
+done
+
+# Run main function
+main
+EOF
+
+chmod +x deploy_mitre_rules.sh
+
+# ===================================
+# Maintenance and Monitoring Script
+# ===================================
+cat > monitor_mitre_rules.sh << 'EOF'
+#!/bin/bash
+# MITRE ATT&CK Rules Monitoring and Maintenance Script
+
+set -e
+
+# Configuration
+SO_HOST=${SO_HOST:-"localhost"}
+API_KEY_FILE="/opt/so/conf/mitre-api-key.txt"
+LOG_FILE="/var/log/mitre-monitoring.log"
+
+# Load API key
+if [ -f "$API_KEY_FILE" ]; then
+    API_KEY=$(cat "$API_KEY_FILE")
+else
+    echo "Error: API key file not found: $API_KEY_FILE"
+    exit 1
+fi
+
+# Logging function
+log() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "$LOG_FILE"
+}
+
+# Check watcher health
+check_watcher_health() {
+    log "Checking Elasticsearch Watcher health..."
+    
+    response=$(curl -s -X GET "https://$SO_HOST:9200/_watcher/stats" \
+        -H "Authorization: ApiKey $API_KEY" \
+        -k)
+    
+    if echo "$response" | jq -e '.watcher_state == "started"' > /dev/null; then
+        log "✅ Watcher service is running"
+    else
+        log "❌ Watcher service issue detected"
+        echo "$response" | jq '.'
+    fi
+}
+
+# Check rule execution status
+check_rule_execution() {
+    log "Checking MITRE rule execution status..."
+    
+    # Get watcher execution history
+    response=$(curl -s -X GET "https://$SO_HOST:9200/.watcher-history-*/_search" \
+        -H "Authorization: ApiKey $API_KEY" \
+        -H "Content-Type: application/json" \
+        -d '{
+            "query": {
+                "bool": {
+                    "must": [
+                        {"wildcard": {"watch_id": "sigma_rule_*"}},
+                        {"range": {"@timestamp": {"gte": "now-1h"}}}
+                    ]
+                }
+            },
+            "aggs": {
+                "execution_status": {
+                    "terms": {"field": "state"}
+                }
+            },
+            "size": 0
+        }' \
+        -k)
+    
+    log "Rule execution status (last hour):"
+    echo "$response" | jq -r '.aggregations.execution_status.buckets[] | "\(.key): \(.doc_count)"' | while read line; do
+        log "  $line"
+    done
+}
+
+# Check alert volume
+check_alert_volume() {
+    log "Checking MITRE alert volume..."
+    
+    response=$(curl -s -X GET "https://$SO_HOST:9200/logstash-*/_search" \
+        -H "Authorization: ApiKey $API_KEY" \
+        -H "Content-Type: application/json" \
+        -d '{
+            "query": {
+                "bool": {
+                    "must": [
+                        {"exists": {"field": "mitre_tags"}},
+                        {"range": {"@timestamp": {"gte": "now-24h"}}}
+                    ]
+                }
+            },
+            "aggs": {
+                "alerts_by_severity": {
+                    "terms": {"field": "severity.keyword"}
+                },
+                "alerts_by_technique": {
+                    "terms": {"field": "mitre_technique.keyword", "size": 10}
+                }
+            },
+            "size": 0
+        }' \
+        -k)
+    
+    log "Alert volume (last 24 hours):"
+    echo "$response" | jq -r '.aggregations.alerts_by_severity.buckets[] | "  \(.key): \(.doc_count)"' | while read line; do
+        log "$line"
+    done
+    
+    log "Top techniques (last 24 hours):"
+    echo "$response" | jq -r '.aggregations.alerts_by_technique.buckets[] | "  \(.key): \(.doc_count)"' | while read line; do
+        log "$line"
+    done
+}
+
+# Performance metrics
+check_performance() {
+    log "Checking rule performance metrics..."
+    
+    # Check Elasticsearch cluster health
+    response=$(curl -s -X GET "https://$SO_HOST:9200/_cluster/health" \
+        -H "Authorization: ApiKey $API_KEY" \
+        -k)
+    
+    cluster_status=$(echo "$response" | jq -r '.status')
+    log "Elasticsearch cluster status: $cluster_status"
+    
+    if [ "$cluster_status" != "green" ]; then
+        log "⚠️  Cluster health issue detected"
+        echo "$response" | jq '.'
+    fi
+    
+    # Check watcher thread pool
+    response=$(curl -s -X GET "https://$SO_HOST:9200/_cat/thread_pool/watcher?v&h=name,active,queue,rejected,completed" \
+        -H "Authorization: ApiKey $API_KEY" \
+        -k)
+    
+    log "Watcher thread pool status:"
+    echo "$response" | while read line; do
+        log "  $line"
+    done
+}
+
+# Generate maintenance report
+generate_maintenance_report() {
+    log "Generating maintenance report..."
+    
+    report_file="/tmp/mitre_maintenance_report_$(date +%Y%m%d_%H%M%S).html"
+    
+    cat > "$report_file" << 'HTML_EOF'
+<!DOCTYPE html>
+<html>
+<head>
+    <title>MITRE ATT&CK Rules Maintenance Report</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .header { background-color: #f0f0f0; padding: 10px; border-radius: 5px; }
+        .section { margin: 20px 0; padding: 10px; border: 1px solid #ddd; border-radius: 5px; }
+        .success { color: green; }
+        .warning { color: orange; }
+        .error { color: red; }
+        pre { background-color: #f5f5f5; padding: 10px; border-radius: 3px; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>MITRE ATT&CK Rules Maintenance Report</h1>
+        <p>Generated: $(date)</p>
+        <p>Security Onion Host: $SO_HOST</p>
+    </div>
+HTML_EOF
+
+    # Add monitoring results to report
+    echo '<div class="section"><h2>Monitoring Results</h2><pre>' >> "$report_file"
+    tail -n 50 "$LOG_FILE" >> "$report_file"
+    echo '</pre></div>' >> "$report_file"
+    
+    # Add recommendations
+    cat >> "$report_file" << 'HTML_EOF'
+    <div class="section">
+        <h2>Maintenance Recommendations</h2>
+        <ul>
+            <li>Review high-volume alerts for tuning opportunities</li>
+            <li>Update rule configurations based on false positives</li>
+            <li>Monitor rule performance and adjust thresholds</li>
+            <li>Check for new MITRE ATT&CK techniques to implement</li>
+        </ul>
+    </div>
+</body>
+</html>
+HTML_EOF
+
+    log "Maintenance report generated: $report_file"
+    
+    # Email report if configured
+    if command -v mail &> /dev/null && [ -n "$ADMIN_EMAIL" ]; then
+        mail -s "MITRE ATT&CK Maintenance Report" -a "$report_file" "$ADMIN_EMAIL" < /dev/null
+        log "Maintenance report emailed to $ADMIN_EMAIL"
+    fi
+}
+
+# Main monitoring function
+main() {
+    log "=== Starting MITRE ATT&CK rules monitoring ==="
+    
+    check_watcher_health
+    check_rule_execution
+    check_alert_volume
+    check_performance
+    generate_maintenance_report
+    
+    log "=== Monitoring completed ==="
+}
+
+# Command line options
+case "${1:-}" in
+    --health)
+        check_watcher_health
+        ;;
+    --execution)
+        check_rule_execution
+        ;;
+    --alerts)
+        check_alert_volume
+        ;;
+    --performance)
+        check_performance
+        ;;
+    --report)
+        generate_maintenance_report
+        ;;
+    *)
+        main
+        ;;
+esac
+EOF
+
+chmod +x monitor_mitre_rules.sh
+
+# ===================================
+# Cron Job Setup
+# ===================================
+cat > setup_monitoring_cron.sh << 'EOF'
+#!/bin/bash
+# Setup cron jobs for MITRE ATT&CK rules monitoring
+
+echo "Setting up cron jobs for MITRE monitoring..."
+
+# Create cron job for daily monitoring
+(crontab -l 2>/dev/null; echo "0 2 * * * /opt/mitre-detection-library/monitor_mitre_rules.sh > /dev/null 2>&1") | crontab -
+
+# Create cron job for weekly maintenance
+(crontab -l 2>/dev/null; echo "0 3 * * 0 /opt/mitre-detection-library/monitor_mitre_rules.sh --report > /dev/null 2>&1") | crontab -
+
+echo "Cron jobs configured:"
+echo "- Daily monitoring at 2:00 AM"
+echo "- Weekly maintenance report at 3:00 AM on Sundays"
+
+crontab -l
+EOF
+
+chmod +x setup_monitoring_cron.sh
+
+echo "Security Onion configuration files generated successfully!"
+echo ""
+echo "Files created:"
+echo "- requirements.txt"
+echo "- setup_so_api.sh"
+echo "- configure_so_logging.sh"
+echo "- deploy_mitre_rules.sh"
+echo "- monitor_mitre_rules.sh"
+echo "- setup_monitoring_cron.sh"
+echo ""
+echo "Usage:"
+echo "1. Run ./setup_so_api.sh to create API keys"
+echo "2. Run ./configure_so_logging.sh to optimize logging"
+echo "3. Run ./deploy_mitre_rules.sh to deploy rules"
+echo "4. Run ./setup_monitoring_cron.sh to setup monitoring"
